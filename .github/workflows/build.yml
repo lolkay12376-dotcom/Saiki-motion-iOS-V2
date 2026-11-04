@@ -1,5 +1,15 @@
 # Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
+# v9:
+#   • REPO SELF-TIDY: after every run (success OR failure) the workflow
+#     deletes superseded files from the repo — every old Saiki zip, every
+#     stray README.md, anything that is not the zip that was just built
+#     or the .github/ workflow itself. The commit message carries
+#     "[skip ci]" so the cleanup push does not re-trigger this workflow.
+#     Keeps the repo file list tiny (2 entries) so it stops crashing the
+#     GitHub app on a phone. Runs only when building from an uploaded
+#     zip; extracted-root sources are never touched. Best-effort:
+#     continue-on-error, so a denied push can never redden the build.
 # v8:
 #   • ERROR SUMMARY REORDERED: the real "error:" lines are now the LAST
 #     thing in the log, right above "Error: Process completed" — so
@@ -37,6 +47,10 @@ jobs:
     name: Build unsigned IPA with Xcode
     runs-on: macos-15
     timeout-minutes: 30
+    # The tidy-up step needs to push a deletion commit. Nothing else
+    # uses the extra scope; a denied push is tolerated (continue-on-error).
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout source
@@ -123,6 +137,7 @@ jobs:
                 echo "Saiki zip candidates (top one is built):"
                 printf '%s\n' "$RANKED" | cut -f2- | sed 's/^/  /'
                 ZIPF="$(printf '%s\n' "$RANKED" | head -n 1 | cut -f2-)"
+                echo "zipfile=$ZIPF" >> "$GITHUB_OUTPUT"
 
                 echo ">>> BUILDING FROM ZIP: $ZIPF"
                 mkdir -p unpacked
@@ -246,3 +261,35 @@ jobs:
           path: dist/*.ipa
           if-no-files-found: error
           retention-days: 30
+
+      - name: Tidy the repo (keep only the built zip + the workflow)
+        # Runs on success AND failure: old zips / stray READMEs get removed
+        # either way, so the repo file list stays phone-friendly.
+        if: always()
+        continue-on-error: true
+        run: |
+          KEEP_ZIP="$(basename "${{ steps.project.outputs.zipfile }}")"
+          if [ -z "$KEEP_ZIP" ] || [ "$KEEP_ZIP" = "." ]; then
+            echo "Sources were not uploaded as a zip — leaving the repo untouched."
+            exit 0
+          fi
+          cd "$GITHUB_WORKSPACE"
+          TO_DELETE="$(git ls-files | grep -v '^\.github/' | grep -vx "$KEEP_ZIP" || true)"
+          if [ -z "$TO_DELETE" ]; then
+            echo "Repo is already tidy (only $KEEP_ZIP and .github/)."
+            exit 0
+          fi
+          echo "Removing superseded files:"
+          printf '%s\n' "$TO_DELETE" | sed 's/^/  /'
+          printf '%s\n' "$TO_DELETE" | while IFS= read -r f; do rm -f -- "$f"; done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -u
+          if git diff --cached --quiet; then
+            echo "Nothing to commit."
+          else
+            # [skip ci] stops this push from re-triggering the workflow
+            git commit -m "chore: remove superseded files, keep $KEEP_ZIP [skip ci]"
+            git push
+            echo "Repo tidied — file list is now just $KEEP_ZIP + .github/"
+          fi
