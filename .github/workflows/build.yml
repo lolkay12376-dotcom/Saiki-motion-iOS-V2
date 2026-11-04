@@ -1,15 +1,21 @@
 # Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
-# v6:
-#   • ZIP MATCHING: any zip whose name STARTS with "Saiki" is used
-#     (case-insensitive; anything after "Saiki" is fine — spaces,
-#     hyphens, version numbers). Examples that all match:
-#       SaikiMotion-source-1.5.23fix1.zip
-#       Saiki-source.zip
-#       Saiki Motion.zip
-#       saiki.zip
-#     If several Saiki zips are in the repo, ALL candidates are printed
-#     and the last-sorted one is used. (Keep only one to avoid surprises.)
+# v7:
+#   • SMARTER ZIP PICKING when several Saiki zips are in the repo:
+#     candidates are now ranked by the VERSION in their name
+#     (1.5.23fix2 > 1.5.23fix1 > 1.5.23 > no version), then by name.
+#     v6 used plain alphabetical order, which is case-sensitive — a
+#     lowercase-named old zip ("saiki motion.zip") could silently beat a
+#     newer "SaikiMotion-source-1.5.23fix2.zip". Numbers are padded, so
+#     1.5.10 correctly beats 1.5.9.
+#   • OPTIONAL OVERRIDE: run the workflow manually (Actions tab →
+#     "Run workflow") and fill in "zip_name" to build one exact zip
+#     (e.g. "saiki motion.zip"). Leave it empty for auto-pick.
+#     Push-triggered runs always auto-pick.
+#   • Any zip whose name STARTS with "Saiki" matches (case-insensitive;
+#     anything after "Saiki" is fine — spaces, hyphens, version numbers):
+#       SaikiMotion-source-1.5.23fix2.zip / Saiki-source.zip /
+#       Saiki Motion.zip / saiki.zip
 #   • The chosen zip is echoed in the log — you can always verify which
 #     zip a run actually built from.
 #   • ON FAILURE: a compact "BUILD FAILED — ERROR SUMMARY" section is
@@ -29,6 +35,11 @@ name: Build SaikiMotion IPA
   push:
     branches: [ main ]
   workflow_dispatch:
+    inputs:
+      zip_name:
+        description: 'Zip to build (exact name or glob). Empty = auto-pick the best Saiki*.zip.'
+        required: false
+        default: ''
 
 jobs:
   build-ipa:
@@ -56,6 +67,9 @@ jobs:
 
       - name: Locate sources (root, nested, or inside a zip)
         id: project
+        env:
+          # Optional manual override (workflow_dispatch input; empty on push).
+          ZIP_PATTERN: ${{ github.event.inputs.zip_name }}
         run: |
           DIR=""
 
@@ -72,16 +86,53 @@ jobs:
               echo "Found project nested in: $DIR"
 
             else
-              # Case 3: unpack a zip. Preferred: ANY zip whose name starts
-              # with "Saiki" (case-insensitive — see header comment).
-              echo "Saiki zip candidates (in pick order):"
-              find . -iname 'saiki*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | sed 's/^/  /'
-              ZIPF="$(find . -iname 'saiki*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
-              if [ -z "$ZIPF" ]; then
+              # Case 3: unpack a zip.
+              # Pattern: the manual "zip_name" input if given, else any zip
+              # whose name starts with "Saiki" (case-insensitive).
+              PATTERN="${ZIP_PATTERN:-saiki*.zip}"
+              MANUAL="no"
+              if [ -n "$ZIP_PATTERN" ]; then MANUAL="yes"; fi
+              echo "Zip search pattern: $PATTERN"
+
+              CANDS="$(find . -iname "$PATTERN" -not -path './.git/*' -not -path './unpacked/*' | sort -f)"
+              if [ -z "$CANDS" ] && [ "$MANUAL" = "no" ]; then
                 echo "(no Saiki*.zip found — falling back to any .zip)"
-                ZIPF="$(find . -name '*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
+                CANDS="$(find . -name '*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort -f)"
               fi
-              if [ -n "$ZIPF" ]; then
+              if [ -z "$CANDS" ] && [ "$MANUAL" = "yes" ]; then
+                echo "NOTE: you asked for zip pattern '$PATTERN' — no file in the repo matches it."
+              fi
+
+              if [ -n "$CANDS" ]; then
+                # Rank candidates: by the version token in the name
+                # (numbers zero-padded so 1.5.10 > 1.5.9), then by name.
+                # Zips with no version in the name rank lowest. Uses only
+                # POSIX awk/sort — same behavior on macOS and Linux.
+                RANKED="$(printf '%s\n' "$CANDS" | while IFS= read -r z; do
+                  key="$(printf '%s' "$z" | awk '{
+                    s = tolower($0); v = ""
+                    while (match(s, /[0-9]+(\.[0-9]+)*(fix[0-9]+)?/)) {
+                      v = substr(s, RSTART, RLENGTH)
+                      s = substr(s, RSTART + RLENGTH)
+                    }
+                    if (v == "") { print "00000000000000000000"; next }
+                    out = ""
+                    while (match(v, /[0-9]+/)) {
+                      pre = substr(v, 1, RSTART - 1)
+                      num = substr(v, RSTART, RLENGTH)
+                      while (length(num) < 8) num = "0" num
+                      out = out pre num
+                      v = substr(v, RSTART + RLENGTH)
+                    }
+                    print out v
+                  }')"
+                  printf '%s\t%s\n' "$key" "$z"
+                done | sort -t "$(printf '\t')" -k1,1r -k2,2f)"
+
+                echo "Saiki zip candidates (top one is built):"
+                printf '%s\n' "$RANKED" | cut -f2- | sed 's/^/  /'
+                ZIPF="$(printf '%s\n' "$RANKED" | head -n 1 | cut -f2-)"
+
                 echo ">>> BUILDING FROM ZIP: $ZIPF"
                 mkdir -p unpacked
                 unzip -q -o "$ZIPF" -d unpacked
