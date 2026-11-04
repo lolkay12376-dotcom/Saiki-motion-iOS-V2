@@ -1,18 +1,15 @@
 # Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
-# v4 — handles the exact failure you hit:
-#   "Target CCrashLog has a missing source directory .../Sources/CCrashLog"
-#   = project.yml IS in the repo, but the Sources/ folder is NOT.
-#   Fix in this version: upload SaikiMotion-source-1.5.23.zip as a FILE
-#   (Add file > Upload files > drag the zip) and this workflow UNPACKS IT
-#   ITSELF and builds from inside it. No folder-dragging needed anymore.
+# v5 — 1.5.23fix1. The v4 run reached the Swift compiler and failed on
+#   app code (CrashLog.swift handed UnsafePointer<UInt8> to C functions
+#   that take UnsafePointer<CChar>). The code is fixed in this zip, the
+#   version is bumped to 1.5.23fix1 (build 24) so LiveContainer can tell
+#   it apart, and artifact names now say fix1.
 #
-# Locate order:
-#   1. project.yml + Sources/ at the repo root        → build at root
-#   2. project.yml + Sources/ nested in a folder      → build there
-#   3. any .zip in the repo                           → unzip, build inside
-#   4. nothing usable                                 → list repo contents
-#                                                      and fail with instructions
+# Zip handling hardened: if MORE THAN ONE zip is in the repo (e.g. the old
+#   1.5.23 zip plus this 1.5.23fix1 zip), the newest-named SaikiMotion zip
+#   wins (sorted, last). Still: deleting the old zip from the repo is
+#   cleaner — do that when convenient.
 #
 # Build: xcodegen generate → xcodebuild (unsigned) → Payload/ → .ipa
 # Unsigned is CORRECT for LiveContainer (LC signs on import).
@@ -68,8 +65,14 @@ jobs:
               echo "Found project nested in: $DIR"
 
             else
-              # Case 3: a .zip anywhere in the repo — unpack and use it
-              ZIPF="$(find . -name '*.zip' -not -path './.git/*' -not -path './unpacked/*' | head -n 1)"
+              # Case 3: a .zip anywhere in the repo — unpack and use it.
+              # If several zips are present, the last-sorted *SaikiMotion*
+              # zip wins ("…1.5.23fix1.zip" sorts after "…1.5.23.zip"),
+              # so an old zip left in the repo can't shadow the new one.
+              ZIPF="$(find . -name '*SaikiMotion*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
+              if [ -z "$ZIPF" ]; then
+                ZIPF="$(find . -name '*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
+              fi
               if [ -n "$ZIPF" ]; then
                 echo "No extracted sources found — unpacking $ZIPF"
                 mkdir -p unpacked
@@ -94,7 +97,7 @@ jobs:
             echo ""
             echo "HOW TO FIX (pick ONE — both take under a minute):"
             echo " A) EASIEST: 'Add file' > 'Upload files' > drag the file"
-            echo "    SaikiMotion-source-1.5.23.zip > Commit. This workflow"
+            echo "    SaikiMotion-source-1.5.23fix1.zip > Commit. This workflow"
             echo "    unpacks the zip itself and builds from inside it."
             echo " B) Or upload the EXTRACTED contents of that zip: Sources/,"
             echo "    native/, docs/, project.yml, Info.plist, Package.swift."
@@ -132,14 +135,14 @@ jobs:
           fi
           mkdir -p Payload "$GITHUB_WORKSPACE/dist"
           cp -R "$APP" Payload/
-          zip -qry "$GITHUB_WORKSPACE/dist/SaikiMotion-1.5.23-unsigned.ipa" Payload
-          echo "Packaged: $APP -> dist/SaikiMotion-1.5.23-unsigned.ipa"
+          zip -qry "$GITHUB_WORKSPACE/dist/SaikiMotion-1.5.23fix1-unsigned.ipa" Payload
+          echo "Packaged: $APP -> dist/SaikiMotion-1.5.23fix1-unsigned.ipa"
           ls -la "$GITHUB_WORKSPACE/dist/"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SaikiMotion-1.5.23-unsigned-ipa
+          name: SaikiMotion-1.5.23fix1-unsigned-ipa
           path: dist/*.ipa
           if-no-files-found: error
           retention-days: 30
