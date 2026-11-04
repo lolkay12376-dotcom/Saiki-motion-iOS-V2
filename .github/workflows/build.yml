@@ -1,0 +1,52 @@
+name: Build SaikiMotion IPA
+
+"on":
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    name: Build unsigned IPA for LiveContainer
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install xtool
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: brew install xtool-org/tap/xtool
+
+      - name: Show toolchain versions
+        run: |
+          echo "--- xtool ---"
+          xtool --help || true
+          echo "--- iOS SDK ---"
+          xcrun -sdk iphoneos -show-sdk-path
+
+      - name: Build unsigned IPA
+        run: xtool dev build --ipa
+
+      - name: Collect IPA (any output location)
+        run: |
+          mkdir -p dist
+          IPA="$(find . -name '*.ipa' -not -path './dist/*' -print -quit)"
+          if [ -z "$IPA" ]; then
+            echo "ERROR: no .ipa was produced — check the build log above"
+            exit 1
+          fi
+          cp "$IPA" "dist/SaikiMotion-1.5.23-unsigned.ipa"
+          echo "Built: $IPA -> dist/SaikiMotion-1.5.23-unsigned.ipa"
+          ls -la dist/
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SaikiMotion-1.5.23-unsigned-ipa
+          path: dist/*.ipa
+          if-no-files-found: error
+          retention-days: 30
