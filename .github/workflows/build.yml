@@ -6,7 +6,7 @@
 #     copying from the bottom of the step log always captures them.
 #   • On failure the full xcodebuild.log is ALSO uploaded as an artifact
 #     ("xcodebuild-failure-log") — open it and search for "error:".
-#   • Zip picking: version-ranked, highest wins (fix5 > fix4 > 1.5.23),
+#   • Zip picking: version-ranked, highest wins (fix6 > fix5 > 1.5.23),
 #     optional manual "zip_name" override.
 #
 # Build: xcodegen generate → xcodebuild (unsigned) → Payload/ → .ipa
