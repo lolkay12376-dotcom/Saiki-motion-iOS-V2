@@ -1,3 +1,19 @@
+# project.yml — XcodeGen spec for SaikiMotion.
+#
+# `xcodegen generate` reads this file and creates SaikiMotion.xcodeproj,
+# which xcodebuild then builds normally. GitHub's macOS runners have Xcode
+# preinstalled, so CI = brew install xcodegen + xcodegen generate +
+# xcodebuild. No .xcodeproj is committed; it is generated on demand.
+#
+# Targets:
+#   • CCrashLog — signal-safe C crash logger (its own Swift-importable module)
+#   • CNative  — the recovered C decoders: c-blosc 1.21.5 (VDB Blosc grids)
+#                and abc2glb (Alembic/Ogawa → GLB). bridge.c is the only
+#                file that touches them; abc2glb.c is pulled in by #include.
+#   • SaikiMotion — the app. All sources compile (batch 2/3 landed: the
+#     editor, UI kit and SDK IDE are in, plus the GLES renderer, 3D/VDB
+#     pipeline and the exporter).
+
 name: SaikiMotion
 options:
   bundleIdPrefix: com.saiki
@@ -16,6 +32,28 @@ targets:
         GCC_C_LANGUAGE_STANDARD: gnu11
         SKIP_INSTALL: "YES"
 
+  CNative:
+    type: framework.static
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: native
+        excludes:
+          - "README.md"
+          - "abc2glb.c"        # included by bridge.c (single TU, no dup symbols)
+    settings:
+      base:
+        DEFINES_MODULE: "YES"
+        GCC_C_LANGUAGE_STANDARD: gnu11
+        SKIP_INSTALL: "YES"
+        GCC_PREPROCESSOR_DEFINITIONS:
+          - "HAVE_STDINT_H=1"
+          - "HAVE_STRING_H=1"
+          - "HAVE_STDIO_H=1"
+          - "HAVE_STDLIB_H=1"
+          - "HAVE_INTTYPES_H=1"
+          - "NDEBUG=1"
+
   SaikiMotion:
     type: application
     platform: iOS
@@ -23,13 +61,18 @@ targets:
     sources:
       - path: Sources
         excludes:
+          # CCrashLog compiles as its own framework target above
           - "CCrashLog"
           - "CCrashLog/**"
-          - "App/EditorViewController.swift"
-          - "App/SdkIdeViewController.swift"
-          - "UI/Ui.swift"
+      # the bundled SDK example effects ride along as a folder reference
+      # (Bundle.main "sdk/examples/..." paths stay intact)
+      - path: Resources/sdk
+        type: folder
+        buildPhase: resources
     dependencies:
       - target: CCrashLog
+        embed: false          # static framework: linked, never embedded
+      - target: CNative
         embed: false
     settings:
       base:
@@ -37,8 +80,10 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.saiki.motion.app
         INFOPLIST_FILE: Info.plist
         GENERATE_INFOPLIST_FILE: "NO"
-        SWIFT_VERSION: "5.0"
+        SWIFT_VERSION: "5.0"   # Swift 5 language mode (Xcode's valid value)
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Unsigned build — exactly what LiveContainer wants (LC signs on
+        # import; same as every -unsigned.ipa we shipped).
         CODE_SIGNING_ALLOWED: "NO"
         CODE_SIGNING_REQUIRED: "NO"
         CODE_SIGN_IDENTITY: ""
