@@ -1,5 +1,28 @@
+# Build SaikiMotion .ipa with Xcode (xcodebuild) — no Mac, no Xcode GUI needed.
+#
+# v3 — switched from xtool to plain Xcode, per request. How it works:
+#   1. Runs on a GitHub-hosted macOS runner (Xcode + iOS SDK preinstalled).
+#   2. Installs XcodeGen from Homebrew.
+#   3. `xcodegen generate` turns project.yml into SaikiMotion.xcodeproj.
+#   4. `xcodebuild` builds the Release app for iOS, UNSIGNED (CODE_SIGNING
+#      disabled — exactly what LiveContainer wants; LC signs on import).
+#   5. Packs SaikiMotion.app into Payload/ and zips it as a proper .ipa.
+#   6. Uploads the .ipa as a downloadable artifact.
+#
+# v2 hardening kept: the project is auto-located at the repo root OR inside
+# a nested folder (e.g. everything under SaikiMotion-source/).
+#
+# ⚠️ v2's error "no Package.swift anywhere" meant exactly what it said:
+#    THE SOURCE FILES WERE NEVER UPLOADED. If the repo only contains this
+#    workflow file (and/or a .zip file), delete the zip and upload the
+#    EXTRACTED contents of SaikiMotion-source — Sources/, native/, docs/,
+#    project.yml, Info.plist, Package.swift, ... A workflow cannot build
+#    files that are not in the repo.
+
 name: Build SaikiMotion IPA
 
+# "on" is quoted on purpose — bare `on:` is read as boolean `true`
+# by YAML 1.1 parsers (a classic silent-workflow-never-runs failure).
 "on":
   push:
     branches: [ main ]
@@ -7,7 +30,7 @@ name: Build SaikiMotion IPA
 
 jobs:
   build-ipa:
-    name: Build unsigned IPA for LiveContainer
+    name: Build unsigned IPA with Xcode
     runs-on: macos-15
     timeout-minutes: 30
 
@@ -15,54 +38,74 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Install xtool
+      - name: Install XcodeGen
         env:
+          # Skip brew's self-update: minutes saved, fewer failure modes.
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
-        run: brew install xtool-org/tap/xtool
+        run: brew install xcodegen
 
       - name: Show toolchain versions
         run: |
-          echo "--- xtool ---"
-          xtool --help || true
-          echo "--- iOS SDK ---"
-          xcrun -sdk iphoneos -show-sdk-path
+          echo "--- Xcode ---"
+          xcodebuild -version
+          echo "--- XcodeGen ---"
+          xcodegen --version
 
-      - name: Locate xtool project (root or nested folder)
+      - name: Locate project (root or nested folder)
         id: project
         run: |
-          if [ -f Package.swift ]; then
+          if [ -f project.yml ]; then
             echo "dir=." >> "$GITHUB_OUTPUT"
             echo "Project is at the repo root."
           else
-            PKG="$(find . -name Package.swift -not -path './.git/*' | head -n 1)"
-            if [ -z "$PKG" ]; then
-              echo "ERROR: no Package.swift anywhere in this repo."
-              echo "The source files did not upload — if a .zip file was"
-              echo "uploaded, delete it and upload the EXTRACTED contents."
+            SPEC="$(find . -name project.yml -not -path './.git/*' | head -n 1)"
+            if [ -z "$SPEC" ]; then
+              echo "ERROR: no project.yml anywhere in this repo."
+              echo "The SOURCE FILES did not upload. If your repo shows"
+              echo "SaikiMotion-source-1.5.23.zip (or any .zip) as a FILE,"
+              echo "that is the problem: GitHub does not unzip uploads."
+              echo "Delete it, then 'Add file' > 'Upload files' and drag in"
+              echo "the CONTENTS of the extracted SaikiMotion-source folder"
+              echo "(Sources/, native/, docs/, project.yml, Info.plist, ...)."
               exit 1
             fi
-            DIR="$(dirname "$PKG")"
+            DIR="$(dirname "$SPEC")"
             echo "dir=$DIR" >> "$GITHUB_OUTPUT"
             echo "Project found nested in: $DIR (building there instead)"
             ls -la "$DIR"
           fi
 
-      - name: Build unsigned IPA
+      - name: Generate Xcode project
         working-directory: ${{ steps.project.outputs.dir }}
-        run: xtool dev build --ipa
+        run: xcodegen generate
 
-      - name: Collect IPA (any output location)
+      - name: Build unsigned app (xcodebuild)
+        working-directory: ${{ steps.project.outputs.dir }}
         run: |
-          mkdir -p dist
-          IPA="$(find . -name '*.ipa' -not -path './dist/*' | head -n 1)"
-          if [ -z "$IPA" ]; then
-            echo "ERROR: no .ipa was produced — check the build log above"
+          xcodebuild -project SaikiMotion.xcodeproj \
+                     -scheme SaikiMotion \
+                     -configuration Release \
+                     -destination 'generic/platform=iOS' \
+                     -derivedDataPath build \
+                     CODE_SIGNING_ALLOWED=NO \
+                     CODE_SIGNING_REQUIRED=NO \
+                     CODE_SIGN_IDENTITY="" \
+                     build
+
+      - name: Package unsigned IPA
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          APP="$(find build/Build/Products -name '*.app' -type d | head -n 1)"
+          if [ -z "$APP" ]; then
+            echo "ERROR: no .app was produced — check the xcodebuild log above"
             exit 1
           fi
-          cp "$IPA" "dist/SaikiMotion-1.5.23-unsigned.ipa"
-          echo "Built: $IPA -> dist/SaikiMotion-1.5.23-unsigned.ipa"
-          ls -la dist/
+          mkdir -p Payload "$GITHUB_WORKSPACE/dist"
+          cp -R "$APP" Payload/
+          zip -qry "$GITHUB_WORKSPACE/dist/SaikiMotion-1.5.23-unsigned.ipa" Payload
+          echo "Packaged: $APP -> dist/SaikiMotion-1.5.23-unsigned.ipa"
+          ls -la "$GITHUB_WORKSPACE/dist/"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
