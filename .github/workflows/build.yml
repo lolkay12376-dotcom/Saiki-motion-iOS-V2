@@ -1,15 +1,22 @@
 # Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
-# v5 — 1.5.23fix1. The v4 run reached the Swift compiler and failed on
-#   app code (CrashLog.swift handed UnsafePointer<UInt8> to C functions
-#   that take UnsafePointer<CChar>). The code is fixed in this zip, the
-#   version is bumped to 1.5.23fix1 (build 24) so LiveContainer can tell
-#   it apart, and artifact names now say fix1.
-#
-# Zip handling hardened: if MORE THAN ONE zip is in the repo (e.g. the old
-#   1.5.23 zip plus this 1.5.23fix1 zip), the newest-named SaikiMotion zip
-#   wins (sorted, last). Still: deleting the old zip from the repo is
-#   cleaner — do that when convenient.
+# v6:
+#   • ZIP MATCHING: any zip whose name STARTS with "Saiki" is used
+#     (case-insensitive; anything after "Saiki" is fine — spaces,
+#     hyphens, version numbers). Examples that all match:
+#       SaikiMotion-source-1.5.23fix1.zip
+#       Saiki-source.zip
+#       Saiki Motion.zip
+#       saiki.zip
+#     If several Saiki zips are in the repo, ALL candidates are printed
+#     and the last-sorted one is used. (Keep only one to avoid surprises.)
+#   • The chosen zip is echoed in the log — you can always verify which
+#     zip a run actually built from.
+#   • ON FAILURE: a compact "BUILD FAILED — ERROR SUMMARY" section is
+#     printed at the end (error lines + failed commands + warnings).
+#     Paste THAT whole section if you need help — no more giant logs.
+#   • Artifact name is derived from the version inside the built app
+#     (read from the app's Info.plist), so it can never drift.
 #
 # Build: xcodegen generate → xcodebuild (unsigned) → Payload/ → .ipa
 # Unsigned is CORRECT for LiveContainer (LC signs on import).
@@ -65,22 +72,25 @@ jobs:
               echo "Found project nested in: $DIR"
 
             else
-              # Case 3: a .zip anywhere in the repo — unpack and use it.
-              # If several zips are present, the last-sorted *SaikiMotion*
-              # zip wins ("…1.5.23fix1.zip" sorts after "…1.5.23.zip"),
-              # so an old zip left in the repo can't shadow the new one.
-              ZIPF="$(find . -name '*SaikiMotion*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
+              # Case 3: unpack a zip. Preferred: ANY zip whose name starts
+              # with "Saiki" (case-insensitive — see header comment).
+              echo "Saiki zip candidates (in pick order):"
+              find . -iname 'saiki*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | sed 's/^/  /'
+              ZIPF="$(find . -iname 'saiki*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
               if [ -z "$ZIPF" ]; then
+                echo "(no Saiki*.zip found — falling back to any .zip)"
                 ZIPF="$(find . -name '*.zip' -not -path './.git/*' -not -path './unpacked/*' | sort | tail -n 1)"
               fi
               if [ -n "$ZIPF" ]; then
-                echo "No extracted sources found — unpacking $ZIPF"
+                echo ">>> BUILDING FROM ZIP: $ZIPF"
                 mkdir -p unpacked
                 unzip -q -o "$ZIPF" -d unpacked
                 SPEC="$(find unpacked -name project.yml | head -n 1)"
                 if [ -n "$SPEC" ] && [ -d "$(dirname "$SPEC")/Sources" ]; then
                   DIR="$(dirname "$SPEC")"
                   echo "Using sources from inside $ZIPF ($DIR)"
+                else
+                  echo "NOTE: $ZIPF unpacked, but contains no project.yml + Sources — not usable."
                 fi
               fi
             fi
@@ -96,9 +106,9 @@ jobs:
             echo "--------------------------------------------------------------"
             echo ""
             echo "HOW TO FIX (pick ONE — both take under a minute):"
-            echo " A) EASIEST: 'Add file' > 'Upload files' > drag the file"
-            echo "    SaikiMotion-source-1.5.23fix1.zip > Commit. This workflow"
-            echo "    unpacks the zip itself and builds from inside it."
+            echo " A) EASIEST: 'Add file' > 'Upload files' > drag in a zip whose"
+            echo "    name starts with 'Saiki' (e.g. SaikiMotion-source zip)"
+            echo "    > Commit. This workflow unpacks the zip and builds it."
             echo " B) Or upload the EXTRACTED contents of that zip: Sources/,"
             echo "    native/, docs/, project.yml, Info.plist, Package.swift."
             echo "    (GitHub does NOT unzip files on upload.)"
@@ -115,17 +125,36 @@ jobs:
       - name: Build unsigned app (xcodebuild)
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
-          xcodebuild -project SaikiMotion.xcodeproj \
-                     -scheme SaikiMotion \
-                     -configuration Release \
-                     -destination 'generic/platform=iOS' \
-                     -derivedDataPath build \
-                     CODE_SIGNING_ALLOWED=NO \
-                     CODE_SIGNING_REQUIRED=NO \
-                     CODE_SIGN_IDENTITY="" \
-                     build
+          set -o pipefail
+          LOG="xcodebuild.log"
+          if xcodebuild -project SaikiMotion.xcodeproj \
+                        -scheme SaikiMotion \
+                        -configuration Release \
+                        -destination 'generic/platform=iOS' \
+                        -derivedDataPath build \
+                        CODE_SIGNING_ALLOWED=NO \
+                        CODE_SIGNING_REQUIRED=NO \
+                        CODE_SIGN_IDENTITY="" \
+                        build 2>&1 | tee "$LOG"; then
+            echo "BUILD OK"
+          else
+            echo ""
+            echo "=============================================================="
+            echo " BUILD FAILED - ERROR SUMMARY"
+            echo " (paste this WHOLE section if you need help - it replaces"
+            echo "  copying the huge xcodebuild log)"
+            echo "=============================================================="
+            grep -E "error:" "$LOG" | sort -u | head -40 || echo "(no 'error:' lines found)"
+            echo "---- failed build commands -----------------------------------"
+            sed -n '/The following build commands failed/,/^$/p' "$LOG" | head -20
+            echo "---- warnings -------------------------------------------------"
+            grep -E "warning:" "$LOG" | sort -u | head -15 || true
+            echo "=============================================================="
+            exit 1
+          fi
 
       - name: Package unsigned IPA
+        id: pkg
         working-directory: ${{ steps.project.outputs.dir }}
         run: |
           APP="$(find build/Build/Products -name '*.app' -type d | head -n 1)"
@@ -133,16 +162,22 @@ jobs:
             echo "ERROR: no .app was produced — check the xcodebuild log above"
             exit 1
           fi
+          # Version comes FROM THE BUILT APP, so the artifact name can
+          # never drift from what's actually inside the zip.
+          VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" 2>/dev/null || true)"
+          if [ -z "$VER" ]; then VER="unknown"; fi
+          echo "App version: $VER (read from $APP/Info.plist)"
           mkdir -p Payload "$GITHUB_WORKSPACE/dist"
           cp -R "$APP" Payload/
-          zip -qry "$GITHUB_WORKSPACE/dist/SaikiMotion-1.5.23fix1-unsigned.ipa" Payload
-          echo "Packaged: $APP -> dist/SaikiMotion-1.5.23fix1-unsigned.ipa"
+          zip -qry "$GITHUB_WORKSPACE/dist/SaikiMotion-$VER-unsigned.ipa" Payload
+          echo "Packaged: $APP -> dist/SaikiMotion-$VER-unsigned.ipa"
+          echo "ver=$VER" >> "$GITHUB_OUTPUT"
           ls -la "$GITHUB_WORKSPACE/dist/"
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SaikiMotion-1.5.23fix1-unsigned-ipa
+          name: SaikiMotion-${{ steps.pkg.outputs.ver }}-unsigned-ipa
           path: dist/*.ipa
           if-no-files-found: error
           retention-days: 30
