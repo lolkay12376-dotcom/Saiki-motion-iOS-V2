@@ -46,6 +46,10 @@ targets:
         DEFINES_MODULE: "YES"
         GCC_C_LANGUAGE_STANDARD: gnu11
         SKIP_INSTALL: "YES"
+        # vendored c-blosc 1.21.5 compiles with harmless 64→32 narrowing and
+        # unused-function warnings on arm64; -w keeps the CI error summary
+        # clean so only REAL problems (Swift errors) are visible in it.
+        OTHER_CFLAGS: ["-w"]
         GCC_PREPROCESSOR_DEFINITIONS:
           - "HAVE_STDINT_H=1"
           - "HAVE_STRING_H=1"
