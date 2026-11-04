@@ -1,28 +1,19 @@
 # Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
-# v7:
-#   • SMARTER ZIP PICKING when several Saiki zips are in the repo:
-#     candidates are now ranked by the VERSION in their name
-#     (1.5.23fix2 > 1.5.23fix1 > 1.5.23 > no version), then by name.
-#     v6 used plain alphabetical order, which is case-sensitive — a
-#     lowercase-named old zip ("saiki motion.zip") could silently beat a
-#     newer "SaikiMotion-source-1.5.23fix2.zip". Numbers are padded, so
-#     1.5.10 correctly beats 1.5.9.
-#   • OPTIONAL OVERRIDE: run the workflow manually (Actions tab →
-#     "Run workflow") and fill in "zip_name" to build one exact zip
-#     (e.g. "saiki motion.zip"). Leave it empty for auto-pick.
-#     Push-triggered runs always auto-pick.
-#   • Any zip whose name STARTS with "Saiki" matches (case-insensitive;
-#     anything after "Saiki" is fine — spaces, hyphens, version numbers):
-#       SaikiMotion-source-1.5.23fix2.zip / Saiki-source.zip /
-#       Saiki Motion.zip / saiki.zip
-#   • The chosen zip is echoed in the log — you can always verify which
-#     zip a run actually built from.
-#   • ON FAILURE: a compact "BUILD FAILED — ERROR SUMMARY" section is
-#     printed at the end (error lines + failed commands + warnings).
-#     Paste THAT whole section if you need help — no more giant logs.
-#   • Artifact name is derived from the version inside the built app
-#     (read from the app's Info.plist), so it can never drift.
+# v8:
+#   • ERROR SUMMARY REORDERED: the real "error:" lines are now the LAST
+#     thing in the log, right above "Error: Process completed" — so
+#     copying from the bottom of the step log always captures them.
+#     (v7 printed them first; they kept getting missed when copying.)
+#   • On failure the full xcodebuild.log is ALSO uploaded as an artifact
+#     ("xcodebuild-failure-log") — open it in the browser/GitHub app and
+#     search for "error:" if copying from the log view ever fails again.
+#   • Errors are no longer sorted: they stay in build order (easier to
+#     read), capped at 60, with a count.
+#   • Zip picking is unchanged from v7: version-ranked, highest wins
+#     (1.5.23fix2 > 1.5.23fix1 > 1.5.23 > no version; padded so 1.5.10
+#     beats 1.5.9), optional manual "zip_name" override, chosen zip is
+#     echoed in the log.
 #
 # Build: xcodegen generate → xcodebuild (unsigned) → Payload/ → .ipa
 # Unsigned is CORRECT for LiveContainer (LC signs on import).
@@ -161,7 +152,7 @@ jobs:
             echo "    name starts with 'Saiki' (e.g. SaikiMotion-source zip)"
             echo "    > Commit. This workflow unpacks the zip and builds it."
             echo " B) Or upload the EXTRACTED contents of that zip: Sources/,"
-            echo "    native/, docs/, project.yml, Info.plist, Package.swift."
+            echo "    native/, project.yml, Info.plist, .github/."
             echo "    (GitHub does NOT unzip files on upload.)"
             exit 1
           fi
@@ -192,17 +183,40 @@ jobs:
             echo ""
             echo "=============================================================="
             echo " BUILD FAILED - ERROR SUMMARY"
-            echo " (paste this WHOLE section if you need help - it replaces"
-            echo "  copying the huge xcodebuild log)"
+            echo " The ERRORS are at the very BOTTOM of this section, between"
+            echo " the ### marker lines - copy from there upward."
             echo "=============================================================="
-            grep -E "error:" "$LOG" | sort -u | head -40 || echo "(no 'error:' lines found)"
+            echo "---- warnings (max 10, usually harmless C-library noise) -----"
+            grep -E "warning:" "$LOG" | sort -u | head -10 || echo "(none)"
             echo "---- failed build commands -----------------------------------"
-            sed -n '/The following build commands failed/,/^$/p' "$LOG" | head -20
-            echo "---- warnings -------------------------------------------------"
-            grep -E "warning:" "$LOG" | sort -u | head -15 || true
-            echo "=============================================================="
+            sed -n '/The following build commands failed/,/^$/p' "$LOG" | head -25
+            echo "---- last 25 lines of the build log (context) ----------------"
+            tail -25 "$LOG"
+            echo ""
+            echo "##############################################################"
+            echo "###  THE ACTUAL ERRORS - START COPYING HERE  #################"
+            echo "##############################################################"
+            grep "error:" "$LOG" | head -60
+            EC="$(grep -c "error:" "$LOG" || true)"
+            if [ "$EC" = "0" ]; then
+              echo "(no lines contain 'error:' - instead paste the 25 context lines above)"
+            else
+              echo "( $EC error lines total )"
+            fi
+            echo "##############################################################"
+            echo "###  END OF ERRORS  ##########################################"
+            echo "##############################################################"
             exit 1
           fi
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: xcodebuild-failure-log
+          path: ${{ steps.project.outputs.dir }}/xcodebuild.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package unsigned IPA
         id: pkg
