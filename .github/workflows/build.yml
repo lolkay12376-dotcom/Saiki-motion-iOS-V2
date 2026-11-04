@@ -1,23 +1,21 @@
-# Build SaikiMotion .ipa with Xcode (xcodebuild) — no Mac, no Xcode GUI needed.
+# Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
-# v3 — switched from xtool to plain Xcode, per request. How it works:
-#   1. Runs on a GitHub-hosted macOS runner (Xcode + iOS SDK preinstalled).
-#   2. Installs XcodeGen from Homebrew.
-#   3. `xcodegen generate` turns project.yml into SaikiMotion.xcodeproj.
-#   4. `xcodebuild` builds the Release app for iOS, UNSIGNED (CODE_SIGNING
-#      disabled — exactly what LiveContainer wants; LC signs on import).
-#   5. Packs SaikiMotion.app into Payload/ and zips it as a proper .ipa.
-#   6. Uploads the .ipa as a downloadable artifact.
+# v4 — handles the exact failure you hit:
+#   "Target CCrashLog has a missing source directory .../Sources/CCrashLog"
+#   = project.yml IS in the repo, but the Sources/ folder is NOT.
+#   Fix in this version: upload SaikiMotion-source-1.5.23.zip as a FILE
+#   (Add file > Upload files > drag the zip) and this workflow UNPACKS IT
+#   ITSELF and builds from inside it. No folder-dragging needed anymore.
 #
-# v2 hardening kept: the project is auto-located at the repo root OR inside
-# a nested folder (e.g. everything under SaikiMotion-source/).
+# Locate order:
+#   1. project.yml + Sources/ at the repo root        → build at root
+#   2. project.yml + Sources/ nested in a folder      → build there
+#   3. any .zip in the repo                           → unzip, build inside
+#   4. nothing usable                                 → list repo contents
+#                                                      and fail with instructions
 #
-# ⚠️ v2's error "no Package.swift anywhere" meant exactly what it said:
-#    THE SOURCE FILES WERE NEVER UPLOADED. If the repo only contains this
-#    workflow file (and/or a .zip file), delete the zip and upload the
-#    EXTRACTED contents of SaikiMotion-source — Sources/, native/, docs/,
-#    project.yml, Info.plist, Package.swift, ... A workflow cannot build
-#    files that are not in the repo.
+# Build: xcodegen generate → xcodebuild (unsigned) → Payload/ → .ipa
+# Unsigned is CORRECT for LiveContainer (LC signs on import).
 
 name: Build SaikiMotion IPA
 
@@ -52,29 +50,60 @@ jobs:
           echo "--- XcodeGen ---"
           xcodegen --version
 
-      - name: Locate project (root or nested folder)
+      - name: Locate sources (root, nested, or inside a zip)
         id: project
         run: |
-          if [ -f project.yml ]; then
-            echo "dir=." >> "$GITHUB_OUTPUT"
-            echo "Project is at the repo root."
+          DIR=""
+
+          # Case 1: project.yml + Sources at the repo root
+          if [ -f project.yml ] && [ -d Sources ]; then
+            DIR="."
+            echo "Found project.yml + Sources at the repo root."
+
           else
-            SPEC="$(find . -name project.yml -not -path './.git/*' | head -n 1)"
-            if [ -z "$SPEC" ]; then
-              echo "ERROR: no project.yml anywhere in this repo."
-              echo "The SOURCE FILES did not upload. If your repo shows"
-              echo "SaikiMotion-source-1.5.23.zip (or any .zip) as a FILE,"
-              echo "that is the problem: GitHub does not unzip uploads."
-              echo "Delete it, then 'Add file' > 'Upload files' and drag in"
-              echo "the CONTENTS of the extracted SaikiMotion-source folder"
-              echo "(Sources/, native/, docs/, project.yml, Info.plist, ...)."
-              exit 1
+            # Case 2: project.yml + Sources nested in a folder
+            SPEC="$(find . -name project.yml -not -path './.git/*' -not -path './unpacked/*' | head -n 1)"
+            if [ -n "$SPEC" ] && [ -d "$(dirname "$SPEC")/Sources" ]; then
+              DIR="$(dirname "$SPEC")"
+              echo "Found project nested in: $DIR"
+
+            else
+              # Case 3: a .zip anywhere in the repo — unpack and use it
+              ZIPF="$(find . -name '*.zip' -not -path './.git/*' -not -path './unpacked/*' | head -n 1)"
+              if [ -n "$ZIPF" ]; then
+                echo "No extracted sources found — unpacking $ZIPF"
+                mkdir -p unpacked
+                unzip -q -o "$ZIPF" -d unpacked
+                SPEC="$(find unpacked -name project.yml | head -n 1)"
+                if [ -n "$SPEC" ] && [ -d "$(dirname "$SPEC")/Sources" ]; then
+                  DIR="$(dirname "$SPEC")"
+                  echo "Using sources from inside $ZIPF ($DIR)"
+                fi
+              fi
             fi
-            DIR="$(dirname "$SPEC")"
-            echo "dir=$DIR" >> "$GITHUB_OUTPUT"
-            echo "Project found nested in: $DIR (building there instead)"
-            ls -la "$DIR"
           fi
+
+          # Case 4: nothing usable — show what IS in the repo, then fail
+          if [ -z "$DIR" ]; then
+            echo "ERROR: the SaikiMotion sources are not in this repo."
+            echo ""
+            echo "The repo currently contains ONLY these files:"
+            echo "--------------------------------------------------------------"
+            find . -not -path './.git/*' -not -path './unpacked/*' -type f -print | sed 's|^\./||' | head -60
+            echo "--------------------------------------------------------------"
+            echo ""
+            echo "HOW TO FIX (pick ONE — both take under a minute):"
+            echo " A) EASIEST: 'Add file' > 'Upload files' > drag the file"
+            echo "    SaikiMotion-source-1.5.23.zip > Commit. This workflow"
+            echo "    unpacks the zip itself and builds from inside it."
+            echo " B) Or upload the EXTRACTED contents of that zip: Sources/,"
+            echo "    native/, docs/, project.yml, Info.plist, Package.swift."
+            echo "    (GitHub does NOT unzip files on upload.)"
+            exit 1
+          fi
+
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          ls -la "$DIR"
 
       - name: Generate Xcode project
         working-directory: ${{ steps.project.outputs.dir }}
