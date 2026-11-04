@@ -28,13 +28,34 @@ jobs:
           echo "--- iOS SDK ---"
           xcrun -sdk iphoneos -show-sdk-path
 
+      - name: Locate xtool project (root or nested folder)
+        id: project
+        run: |
+          if [ -f Package.swift ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+            echo "Project is at the repo root."
+          else
+            PKG="$(find . -name Package.swift -not -path './.git/*' | head -n 1)"
+            if [ -z "$PKG" ]; then
+              echo "ERROR: no Package.swift anywhere in this repo."
+              echo "The source files did not upload — if a .zip file was"
+              echo "uploaded, delete it and upload the EXTRACTED contents."
+              exit 1
+            fi
+            DIR="$(dirname "$PKG")"
+            echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+            echo "Project found nested in: $DIR (building there instead)"
+            ls -la "$DIR"
+          fi
+
       - name: Build unsigned IPA
+        working-directory: ${{ steps.project.outputs.dir }}
         run: xtool dev build --ipa
 
       - name: Collect IPA (any output location)
         run: |
           mkdir -p dist
-          IPA="$(find . -name '*.ipa' -not -path './dist/*' -print -quit)"
+          IPA="$(find . -name '*.ipa' -not -path './dist/*' | head -n 1)"
           if [ -z "$IPA" ]; then
             echo "ERROR: no .ipa was produced — check the build log above"
             exit 1
