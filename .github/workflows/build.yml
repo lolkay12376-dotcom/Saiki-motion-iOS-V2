@@ -1,29 +1,12 @@
 # Build SaikiMotion .ipa with Xcode — no Mac, no Xcode GUI needed.
 #
-# v9:
-#   • REPO SELF-TIDY: after every run (success OR failure) the workflow
-#     deletes superseded files from the repo — every old Saiki zip, every
-#     stray README.md, anything that is not the zip that was just built
-#     or the .github/ workflow itself. The commit message carries
-#     "[skip ci]" so the cleanup push does not re-trigger this workflow.
-#     Keeps the repo file list tiny (2 entries) so it stops crashing the
-#     GitHub app on a phone. Runs only when building from an uploaded
-#     zip; extracted-root sources are never touched. Best-effort:
-#     continue-on-error, so a denied push can never redden the build.
-# v8:
-#   • ERROR SUMMARY REORDERED: the real "error:" lines are now the LAST
-#     thing in the log, right above "Error: Process completed" — so
-#     copying from the bottom of the step log always captures them.
-#     (v7 printed them first; they kept getting missed when copying.)
-#   • On failure the full xcodebuild.log is ALSO uploaded as an artifact
-#     ("xcodebuild-failure-log") — open it in the browser/GitHub app and
-#     search for "error:" if copying from the log view ever fails again.
-#   • Errors are no longer sorted: they stay in build order (easier to
-#     read), capped at 60, with a count.
-#   • Zip picking is unchanged from v7: version-ranked, highest wins
-#     (1.5.23fix2 > 1.5.23fix1 > 1.5.23 > no version; padded so 1.5.10
-#     beats 1.5.9), optional manual "zip_name" override, chosen zip is
-#     echoed in the log.
+# v10:
+#   • TIDY STEP FIXED: it no longer deletes project.yml (or anything else
+#     that isn't an old Saiki zip / stray README.md). Only superseded
+#     Saiki*.zip and README.md files are removed; project.yml, Info.plist,
+#     Sources/, native/ and .github/ are never touched.
+# v9: repo self-tidy after each run, "[skip ci]" on the cleanup commit.
+# v8: real "error:" lines are last in the log; failure log uploaded as artifact.
 #
 # Build: xcodegen generate → xcodebuild (unsigned) → Payload/ → .ipa
 # Unsigned is CORRECT for LiveContainer (LC signs on import).
@@ -47,8 +30,6 @@ jobs:
     name: Build unsigned IPA with Xcode
     runs-on: macos-15
     timeout-minutes: 30
-    # The tidy-up step needs to push a deletion commit. Nothing else
-    # uses the extra scope; a denied push is tolerated (continue-on-error).
     permissions:
       contents: write
 
@@ -58,7 +39,6 @@ jobs:
 
       - name: Install XcodeGen
         env:
-          # Skip brew's self-update: minutes saved, fewer failure modes.
           HOMEBREW_NO_AUTO_UPDATE: "1"
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
         run: brew install xcodegen
@@ -73,7 +53,6 @@ jobs:
       - name: Locate sources (root, nested, or inside a zip)
         id: project
         env:
-          # Optional manual override (workflow_dispatch input; empty on push).
           ZIP_PATTERN: ${{ github.event.inputs.zip_name }}
         run: |
           DIR=""
@@ -92,8 +71,6 @@ jobs:
 
             else
               # Case 3: unpack a zip.
-              # Pattern: the manual "zip_name" input if given, else any zip
-              # whose name starts with "Saiki" (case-insensitive).
               PATTERN="${ZIP_PATTERN:-saiki*.zip}"
               MANUAL="no"
               if [ -n "$ZIP_PATTERN" ]; then MANUAL="yes"; fi
@@ -109,10 +86,6 @@ jobs:
               fi
 
               if [ -n "$CANDS" ]; then
-                # Rank candidates: by the version token in the name
-                # (numbers zero-padded so 1.5.10 > 1.5.9), then by name.
-                # Zips with no version in the name rank lowest. Uses only
-                # POSIX awk/sort — same behavior on macOS and Linux.
                 RANKED="$(printf '%s\n' "$CANDS" | while IFS= read -r z; do
                   key="$(printf '%s' "$z" | awk '{
                     s = tolower($0); v = ""
@@ -242,8 +215,6 @@ jobs:
             echo "ERROR: no .app was produced — check the xcodebuild log above"
             exit 1
           fi
-          # Version comes FROM THE BUILT APP, so the artifact name can
-          # never drift from what's actually inside the zip.
           VER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist" 2>/dev/null || true)"
           if [ -z "$VER" ]; then VER="unknown"; fi
           echo "App version: $VER (read from $APP/Info.plist)"
@@ -262,21 +233,25 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Tidy the repo (keep only the built zip + the workflow)
-        # Runs on success AND failure: old zips / stray READMEs get removed
-        # either way, so the repo file list stays phone-friendly.
+      - name: Tidy the repo (remove old zips + stray READMEs only)
+        # Runs on success AND failure. Only superseded Saiki zips and
+        # README.md are removed. project.yml, Info.plist, Sources/, native/,
+        # .github/ and every other file are NEVER deleted.
         if: always()
         continue-on-error: true
         run: |
           KEEP_ZIP="$(basename "${{ steps.project.outputs.zipfile }}")"
           if [ -z "$KEEP_ZIP" ] || [ "$KEEP_ZIP" = "." ]; then
-            echo "Sources were not uploaded as a zip — leaving the repo untouched."
+            echo "Sources were not uploaded as a zip - leaving the repo untouched."
             exit 0
           fi
           cd "$GITHUB_WORKSPACE"
-          TO_DELETE="$(git ls-files | grep -v '^\.github/' | grep -vx "$KEEP_ZIP" || true)"
+          TO_DELETE="$(git ls-files \
+            | grep -iE '(^|/)(saiki[^/]*\.zip|readme\.md)$' \
+            | grep -v '^\.github/' \
+            | grep -vx "$KEEP_ZIP" || true)"
           if [ -z "$TO_DELETE" ]; then
-            echo "Repo is already tidy (only $KEEP_ZIP and .github/)."
+            echo "Nothing to tidy."
             exit 0
           fi
           echo "Removing superseded files:"
@@ -288,8 +263,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Nothing to commit."
           else
-            # [skip ci] stops this push from re-triggering the workflow
-            git commit -m "chore: remove superseded files, keep $KEEP_ZIP [skip ci]"
+            git commit -m "chore: remove superseded zips, keep $KEEP_ZIP [skip ci]"
             git push
-            echo "Repo tidied — file list is now just $KEEP_ZIP + .github/"
           fi
