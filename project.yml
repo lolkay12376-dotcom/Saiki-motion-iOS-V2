@@ -1,5 +1,5 @@
 # project.yml — XcodeGen spec for SaikiMotion (this IS "the project.yml").
-#
+
 # `xcodegen generate` reads this file and creates SaikiMotion.xcodeproj,
 # which xcodebuild (or Xcode.app on a Mac) then builds normally.
 # GitHub's macOS runners have Xcode preinstalled, so CI = brew install
